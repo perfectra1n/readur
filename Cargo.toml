@@ -40,7 +40,7 @@ thiserror = "2.0"
 sysinfo = "0.36"
 raw-cpuid = { version = "11", optional = true }
 reqwest = { version = "0.12", features = ["json", "multipart"] }
-quick-xml = { version = "0.37", features = ["serialize"] }
+quick-xml = { version = "0.38", features = ["serialize"] }
 urlencoding = "2.1"
 oauth2 = "4.4"
 url = "2.4"
