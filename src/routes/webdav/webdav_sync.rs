@@ -10,7 +10,7 @@ use crate::{
     models::{CreateWebDAVFile, UpdateWebDAVSyncState},
     services::file_service::FileService,
     ingestion::document_ingestion::{DocumentIngestionService, IngestionResult},
-    services::webdav::{WebDAVConfig, WebDAVService},
+    services::webdav::{WebDAVConfig, WebDAVService, SmartSyncService},
 };
 
 pub async fn perform_webdav_sync_with_tracking(
@@ -114,19 +114,17 @@ async fn perform_sync_internal(
             warn!("Failed to update sync folder state: {}", e);
         }
         
-        // Discover files in the folder
-        match webdav_service.discover_files_in_directory(folder_path, true).await {
-            Ok(files) => {
-                info!("Found {} files in folder {}", files.len(), folder_path);
+        // Use smart sync service for intelligent scanning
+        let smart_sync_service = SmartSyncService::new(state.clone());
+        
+        match smart_sync_service.evaluate_and_sync(user_id, &webdav_service, folder_path).await {
+            Ok(Some(sync_result)) => {
+                info!("🧠 Smart sync completed for {}: {} files found using {:?}", 
+                      folder_path, sync_result.files.len(), sync_result.strategy_used);
                 
-                // Filter files for processing
-                let files_to_process: Vec<_> = files.into_iter()
+                // Filter files for processing (directories already handled by smart sync service)
+                let files_to_process: Vec<_> = sync_result.files.into_iter()
                     .filter(|file_info| {
-                        // Skip directories
-                        if file_info.is_directory {
-                            return false;
-                        }
-                        
                         // Check if file extension is supported
                         let file_extension = Path::new(&file_info.name)
                             .extension()
@@ -214,9 +212,13 @@ async fn perform_sync_internal(
                 
                 total_files_processed += folder_files_processed;
             }
+            Ok(None) => {
+                info!("✅ Smart sync: No changes detected for {}, skipping folder", folder_path);
+                // No files to process, continue to next folder
+            }
             Err(e) => {
-                error!("Failed to discover files in folder {}: {}", folder_path, e);
-                sync_errors.push(format!("Failed to list folder {}: {}", folder_path, e));
+                error!("Smart sync failed for folder {}: {}", folder_path, e);
+                sync_errors.push(format!("Smart sync failed for folder {}: {}", folder_path, e));
             }
         }
     }
@@ -443,4 +445,5 @@ pub async fn process_files_for_deep_scan(
     info!("Deep scan file processing completed: {} files processed successfully", files_processed);
     Ok(files_processed)
 }
+
 

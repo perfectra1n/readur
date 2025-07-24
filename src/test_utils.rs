@@ -184,7 +184,8 @@ impl TestContext {
         
         let database_url = std::env::var("TEST_DATABASE_URL")
             .unwrap_or_else(|_| format!("postgresql://readur:readur@localhost:{}/readur", port));
-        let db = crate::db::Database::new(&database_url).await.unwrap();
+        // Use enhanced pool configuration for testing with more connections and faster timeouts
+        let db = crate::db::Database::new_with_pool_config(&database_url, 100, 10).await.unwrap();
         
         // Run proper SQLx migrations (PostgreSQL 15+ has gen_random_uuid() built-in)
         let migrations = sqlx::migrate!("./migrations");

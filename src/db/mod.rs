@@ -23,7 +23,7 @@ impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(50)                          // Increased from 20 to handle more concurrent requests
-            .acquire_timeout(Duration::from_secs(10))     // Increased from 3 to 10 seconds
+            .acquire_timeout(Duration::from_secs(30))     // Increased from 10 to 30 seconds
             .idle_timeout(Duration::from_secs(600))       // 10 minute idle timeout
             .max_lifetime(Duration::from_secs(1800))      // 30 minute max lifetime
             .min_connections(5)                           // Maintain minimum connections

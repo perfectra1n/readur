@@ -9,7 +9,7 @@ use crate::models::{
 
 use super::config::{WebDAVConfig, RetryConfig, ConcurrencyConfig};
 use super::connection::WebDAVConnection;
-use super::discovery::WebDAVDiscovery;
+use super::discovery::{WebDAVDiscovery, WebDAVDiscoveryResult};
 use super::validation::{WebDAVValidator, ValidationReport};
 
 /// Main WebDAV service that coordinates all WebDAV operations
@@ -148,6 +148,12 @@ impl WebDAVService {
     pub async fn discover_files_in_directory(&self, directory_path: &str, recursive: bool) -> Result<Vec<FileIngestionInfo>> {
         info!("🔍 Discovering files in directory: {} (recursive: {})", directory_path, recursive);
         self.discovery.discover_files(directory_path, recursive).await
+    }
+
+    /// Discovers both files and directories with their ETags for smart sync
+    pub async fn discover_files_and_directories(&self, directory_path: &str, recursive: bool) -> Result<WebDAVDiscoveryResult> {
+        info!("🔍 Discovering files and directories: {} (recursive: {})", directory_path, recursive);
+        self.discovery.discover_files_and_directories(directory_path, recursive).await
     }
 
     /// Downloads a file from WebDAV server by path

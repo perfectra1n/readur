@@ -10,6 +10,13 @@ use crate::webdav_xml_parser::{parse_propfind_response, parse_propfind_response_
 use super::config::{WebDAVConfig, ConcurrencyConfig};
 use super::connection::WebDAVConnection;
 
+/// Results from WebDAV discovery including both files and directories
+#[derive(Debug, Clone)]
+pub struct WebDAVDiscoveryResult {
+    pub files: Vec<FileIngestionInfo>,
+    pub directories: Vec<FileIngestionInfo>,
+}
+
 pub struct WebDAVDiscovery {
     connection: WebDAVConnection,
     config: WebDAVConfig,
@@ -37,6 +44,17 @@ impl WebDAVDiscovery {
             self.discover_files_recursive(directory_path).await
         } else {
             self.discover_files_single_directory(directory_path).await
+        }
+    }
+
+    /// Discovers both files and directories with their ETags for directory tracking
+    pub async fn discover_files_and_directories(&self, directory_path: &str, recursive: bool) -> Result<WebDAVDiscoveryResult> {
+        info!("🔍 Discovering files and directories in: {}", directory_path);
+        
+        if recursive {
+            self.discover_files_and_directories_recursive(directory_path).await
+        } else {
+            self.discover_files_and_directories_single(directory_path).await
         }
     }
 
@@ -83,6 +101,55 @@ impl WebDAVDiscovery {
         Ok(filtered_files)
     }
 
+    /// Discovers both files and directories in a single directory (non-recursive)
+    async fn discover_files_and_directories_single(&self, directory_path: &str) -> Result<WebDAVDiscoveryResult> {
+        let url = self.connection.get_url_for_path(directory_path);
+        
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8"?>
+            <D:propfind xmlns:D="DAV:">
+                <D:prop>
+                    <D:displayname/>
+                    <D:getcontentlength/>
+                    <D:getlastmodified/>
+                    <D:getetag/>
+                    <D:resourcetype/>
+                    <D:creationdate/>
+                </D:prop>
+            </D:propfind>"#;
+
+        let response = self.connection
+            .authenticated_request(
+                Method::from_bytes(b"PROPFIND")?,
+                &url,
+                Some(propfind_body.to_string()),
+                Some(vec![
+                    ("Depth", "1"),
+                    ("Content-Type", "application/xml"),
+                ]),
+            )
+            .await?;
+
+        let body = response.text().await?;
+        let all_items = parse_propfind_response_with_directories(&body)?;
+        
+        // Separate files and directories
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        
+        for item in all_items {
+            if item.is_directory {
+                directories.push(item);
+            } else if self.config.is_supported_extension(&item.name) {
+                files.push(item);
+            }
+        }
+
+        debug!("Single directory '{}': {} files, {} directories", 
+            directory_path, files.len(), directories.len());
+            
+        Ok(WebDAVDiscoveryResult { files, directories })
+    }
+
     /// Discovers files recursively in directory tree
     async fn discover_files_recursive(&self, root_directory: &str) -> Result<Vec<FileIngestionInfo>> {
         let mut all_files = Vec::new();
@@ -123,6 +190,54 @@ impl WebDAVDiscovery {
 
         info!("Recursive discovery found {} total files", all_files.len());
         Ok(all_files)
+    }
+
+    /// Discovers both files and directories recursively in directory tree
+    async fn discover_files_and_directories_recursive(&self, root_directory: &str) -> Result<WebDAVDiscoveryResult> {
+        let mut all_files = Vec::new();
+        let mut all_directories = Vec::new();
+        let mut directories_to_scan = vec![root_directory.to_string()];
+        let semaphore = Semaphore::new(self.concurrency_config.max_concurrent_scans);
+
+        while !directories_to_scan.is_empty() {
+            let current_batch: Vec<String> = directories_to_scan
+                .drain(..)
+                .take(self.concurrency_config.max_concurrent_scans)
+                .collect();
+
+            let tasks = current_batch.into_iter().map(|dir| {
+                let semaphore = &semaphore;
+                async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    self.scan_directory_with_all_info(&dir).await
+                }
+            });
+
+            let results = stream::iter(tasks)
+                .buffer_unordered(self.concurrency_config.max_concurrent_scans)
+                .collect::<Vec<_>>()
+                .await;
+
+            for result in results {
+                match result {
+                    Ok((files, directories, subdirs_to_scan)) => {
+                        all_files.extend(files);
+                        all_directories.extend(directories);
+                        directories_to_scan.extend(subdirs_to_scan);
+                    }
+                    Err(e) => {
+                        warn!("Failed to scan directory: {}", e);
+                    }
+                }
+            }
+        }
+
+        info!("Recursive discovery found {} total files and {} directories", 
+              all_files.len(), all_directories.len());
+        Ok(WebDAVDiscoveryResult { 
+            files: all_files, 
+            directories: all_directories 
+        })
     }
 
     /// Scans a directory and returns both files and subdirectories
@@ -180,6 +295,69 @@ impl WebDAVDiscovery {
             directory_path, filtered_files.len(), full_dir_paths.len());
             
         Ok((filtered_files, full_dir_paths))
+    }
+
+    /// Scans a directory and returns files, directories, and subdirectory paths for queue
+    async fn scan_directory_with_all_info(&self, directory_path: &str) -> Result<(Vec<FileIngestionInfo>, Vec<FileIngestionInfo>, Vec<String>)> {
+        let url = self.connection.get_url_for_path(directory_path);
+        
+        let propfind_body = r#"<?xml version="1.0" encoding="utf-8"?>
+            <D:propfind xmlns:D="DAV:">
+                <D:prop>
+                    <D:displayname/>
+                    <D:getcontentlength/>
+                    <D:getlastmodified/>
+                    <D:getetag/>
+                    <D:resourcetype/>
+                    <D:creationdate/>
+                </D:prop>
+            </D:propfind>"#;
+
+        let response = self.connection
+            .authenticated_request(
+                Method::from_bytes(b"PROPFIND")?,
+                &url,
+                Some(propfind_body.to_string()),
+                Some(vec![
+                    ("Depth", "1"),
+                    ("Content-Type", "application/xml"),
+                ]),
+            )
+            .await?;
+
+        let body = response.text().await?;
+        let all_items = parse_propfind_response_with_directories(&body)?;
+        
+        // Separate files and directories
+        let mut filtered_files = Vec::new();
+        let mut directories = Vec::new();
+        let mut subdirectory_paths = Vec::new();
+        
+        for item in all_items {
+            if item.is_directory {
+                // Fix the directory path to be absolute
+                let full_path = if directory_path == "/" {
+                    format!("/{}", item.path.trim_start_matches('/'))
+                } else {
+                    format!("{}/{}", directory_path.trim_end_matches('/'), item.path.trim_start_matches('/'))
+                };
+                
+                // Create a directory info with the corrected path
+                let mut directory_info = item.clone();
+                directory_info.path = full_path.clone();
+                directories.push(directory_info);
+                
+                // Add to paths for further scanning
+                subdirectory_paths.push(full_path);
+            } else if self.config.is_supported_extension(&item.name) {
+                filtered_files.push(item);
+            }
+        }
+
+        debug!("Directory '{}': {} files, {} directories, {} paths to scan", 
+            directory_path, filtered_files.len(), directories.len(), subdirectory_paths.len());
+            
+        Ok((filtered_files, directories, subdirectory_paths))
     }
 
     /// Estimates crawl time and file counts for watch folders

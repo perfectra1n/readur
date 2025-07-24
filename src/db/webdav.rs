@@ -352,6 +352,19 @@ impl Database {
         Ok(result.rows_affected() as i64)
     }
 
+    /// Delete a specific WebDAV directory by path
+    pub async fn delete_webdav_directory(&self, user_id: Uuid, directory_path: &str) -> Result<bool> {
+        let result = sqlx::query(
+            r#"DELETE FROM webdav_directories WHERE user_id = $1 AND directory_path = $2"#
+        )
+        .bind(user_id)
+        .bind(directory_path)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Find directories with incomplete scans that need recovery
     pub async fn get_incomplete_webdav_scans(&self, user_id: Uuid) -> Result<Vec<String>> {
         let rows = sqlx::query(

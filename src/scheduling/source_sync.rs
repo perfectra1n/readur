@@ -125,20 +125,28 @@ impl SourceSyncService {
             |folder_path| {
                 let service = webdav_service.clone();
                 let state_clone = self.state.clone();
+                let user_id = source.user_id;  // Capture user_id from source
                 async move { 
-                    info!("🚀 Using WebDAV discovery for: {}", folder_path);
-                    let result = service.discover_files_in_directory(&folder_path, true).await;
-                    match &result {
-                        Ok(files) => {
-                            if files.is_empty() {
-                                info!("✅ Directory {} unchanged, skipped deep scan", folder_path);
-                            } else {
-                                info!("🔄 Directory {} changed, discovered {} files", folder_path, files.len());
-                            }
+                    info!("🧠 Using smart sync for scheduled sync: {}", folder_path);
+                    
+                    // Use smart sync service for intelligent discovery
+                    let smart_sync_service = crate::services::webdav::SmartSyncService::new(state_clone);
+                    
+                    match smart_sync_service.evaluate_and_sync(user_id, &service, &folder_path).await {
+                        Ok(Some(sync_result)) => {
+                            info!("✅ Smart sync completed for {}: {} files found using {:?}", 
+                                  folder_path, sync_result.files.len(), sync_result.strategy_used);
+                            Ok(sync_result.files)
                         },
-                        Err(e) => error!("WebDAV discovery failed for folder {}: {}", folder_path, e),
+                        Ok(None) => {
+                            info!("🔍 Smart sync: No changes detected for {}, skipping", folder_path);
+                            Ok(Vec::new()) // No files to process
+                        },
+                        Err(e) => {
+                            error!("Smart sync failed for scheduled sync {}: {}", folder_path, e);
+                            Err(e)
+                        }
                     }
-                    result
                 }
             },
             |file_path| {

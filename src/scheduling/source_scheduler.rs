@@ -685,19 +685,41 @@ impl SourceScheduler {
                 }
             )?;
             
-            // Run deep scan in background
+            // Run smart deep scan in background
             let source_clone = source.clone();
             let state_clone = state.clone();
             tokio::spawn(async move {
-                match webdav_service.discover_all_files().await {
-                    Ok(files) => {
-                        info!("🎉 Automatic deep scan completed for {}: {} files found", source_clone.name, files.len());
-                        
-                        // Process the files if any were found
-                        let files_processed = if !files.is_empty() {
-                            let total_files = files.len();
+                // Use smart sync service for automatic deep scans
+                let smart_sync_service = crate::services::webdav::SmartSyncService::new(state_clone.clone());
+                let mut all_files_to_process = Vec::new();
+                let mut total_directories_tracked = 0;
+                
+                // Process all watch folders using smart deep scan
+                for watch_folder in &webdav_config.watch_folders {
+                    match smart_sync_service.perform_smart_sync(
+                        source_clone.user_id, 
+                        &webdav_service, 
+                        watch_folder, 
+                        crate::services::webdav::SmartSyncStrategy::FullDeepScan // Force deep scan for automatic triggers
+                    ).await {
+                        Ok(sync_result) => {
+                            all_files_to_process.extend(sync_result.files);
+                            total_directories_tracked += sync_result.directories.len();
+                        }
+                        Err(e) => {
+                            error!("Automatic smart deep scan failed for watch folder {}: {}", watch_folder, e);
+                        }
+                    }
+                }
+                
+                info!("🎉 Automatic smart deep scan completed for {}: {} files found, {} directories tracked", 
+                      source_clone.name, all_files_to_process.len(), total_directories_tracked);
+                
+                // Process the files if any were found
+                let files_processed = if !all_files_to_process.is_empty() {
+                            let total_files = all_files_to_process.len();
                             // Filter and process files as in the manual deep scan
-                            let files_to_process: Vec<_> = files.into_iter()
+                            let files_to_process: Vec<_> = all_files_to_process.into_iter()
                                 .filter(|file_info| {
                                     if file_info.is_directory {
                                         return false;
@@ -747,30 +769,6 @@ impl SourceScheduler {
                         if let Err(e) = state_clone.db.create_notification(source_clone.user_id, &notification).await {
                             error!("Failed to create success notification: {}", e);
                         }
-                    }
-                    Err(e) => {
-                        error!("Automatic deep scan failed for {}: {}", source_clone.name, e);
-                        
-                        // Error notification
-                        let notification = crate::models::CreateNotification {
-                            notification_type: "error".to_string(),
-                            title: "Automatic Deep Scan Failed".to_string(),
-                            message: format!("Deep scan of {} failed: {}", source_clone.name, e),
-                            action_url: Some("/sources".to_string()),
-                            metadata: Some(serde_json::json!({
-                                "source_type": source_clone.source_type.to_string(),
-                                "source_id": source_clone.id,
-                                "scan_type": "deep_scan",
-                                "automatic": true,
-                                "error": e.to_string()
-                            })),
-                        };
-                        
-                        if let Err(e) = state_clone.db.create_notification(source_clone.user_id, &notification).await {
-                            error!("Failed to create error notification: {}", e);
-                        }
-                    }
-                }
             });
         }
         
